@@ -228,11 +228,9 @@
             {:else}
                 <EmptyState
                     title="No favorites yet"
-                    body="Tap the heart on any wallpaper in Wallhaven or Local to save it here for quick access."
-                    actionLabel="Browse Wallhaven"
-                    onaction={() => setActiveTab('wallhaven')}
-                    secondaryLabel="Browse Local"
-                    onsecondary={() => setActiveTab('local')}
+                    body="Tap the heart on any wallpaper in Local to save it here for quick access."
+                    actionLabel="Browse Local"
+                    onaction={() => setActiveTab('local')}
                 >
                     {#snippet icon()}
                         <svg

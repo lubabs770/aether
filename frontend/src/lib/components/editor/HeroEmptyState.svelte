@@ -51,7 +51,7 @@
             Pick a wallpaper to begin
         </h2>
         <p class="text-fg-dimmed mb-6 text-[11px]">
-            Browse local files or search Wallhaven to begin
+            Browse local files to begin
         </p>
         <div class="mb-8 flex justify-center gap-2">
             <button
@@ -60,12 +60,6 @@
                 disabled={isBrowsing}
             >
                 {isBrowsing ? 'Opening...' : 'Browse Files'}
-            </button>
-            <button
-                class="text-fg-secondary border-border hover:text-fg-primary hover:bg-bg-hover border px-4 py-1.5 text-[11px] font-medium transition-colors duration-100"
-                onclick={() => setActiveTab('wallhaven')}
-            >
-                Search Wallhaven
             </button>
             <button
                 class="text-fg-secondary border-border hover:text-fg-primary hover:bg-bg-hover border px-4 py-1.5 text-[11px] font-medium transition-colors duration-100"
@@ -92,7 +86,7 @@
                         <span class="text-fg-primary font-medium"
                             >Pick a wallpaper.</span
                         >
-                        Browse your local files or search Wallhaven for an image.
+                        Browse your local files for an image.
                     </span>
                 </li>
                 <li class="flex gap-3">

@@ -26,10 +26,6 @@
     >
     <button
         class="text-fg-secondary border-border hover:bg-bg-elevated border px-3 py-1 text-[10px] transition-colors"
-        onclick={() => setActiveTab('wallhaven')}>Wallhaven</button
-    >
-    <button
-        class="text-fg-secondary border-border hover:bg-bg-elevated border px-3 py-1 text-[10px] transition-colors"
         onclick={() => setActiveTab('local')}>Local</button
     >
 </div>

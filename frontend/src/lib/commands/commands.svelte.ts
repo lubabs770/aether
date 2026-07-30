@@ -41,13 +41,6 @@ export function buildCommands(): Command[] {
             run: () => setActiveTab('editor'),
         },
         {
-            id: 'nav.wallhaven',
-            label: 'Go to Wallhaven',
-            category: 'Navigate',
-            keywords: 'browse online wallpapers',
-            run: () => setActiveTab('wallhaven'),
-        },
-        {
             id: 'nav.local',
             label: 'Go to Local',
             category: 'Navigate',

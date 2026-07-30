@@ -2,6 +2,7 @@ package wallhaven
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,10 +24,17 @@ type Client struct {
 	apiKey string
 }
 
+// blockedTransport fails every wallhaven request before it leaves the machine.
+type blockedTransport struct{}
+
+func (blockedTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("wallhaven is disabled in this build")
+}
+
 // NewClient creates a new wallhaven API client.
 func NewClient() *Client {
 	return &Client{
-		http: &http.Client{Timeout: 30 * time.Second},
+		http: &http.Client{Timeout: 30 * time.Second, Transport: blockedTransport{}},
 	}
 }
 
