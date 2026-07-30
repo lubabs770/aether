@@ -92,8 +92,11 @@ export function setColorPickerModel(m: ColorModel): void {
 }
 
 // --- Actions ---
+// Fork: Wallhaven is disabled. Guarding here instead of deleting every call
+// site keeps the diff against upstream small — any entry point upstream adds
+// (nav, command palette, --tab flag) lands on Local instead of a dead tab.
 export function setActiveTab(tab: Tab): void {
-    activeTab = tab;
+    activeTab = tab === 'wallhaven' ? 'local' : tab;
 }
 
 export function toggleSidebar(): void {
