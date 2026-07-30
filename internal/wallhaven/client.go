@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"aether/internal/platform"
@@ -24,17 +25,28 @@ type Client struct {
 	apiKey string
 }
 
-// blockedTransport fails every wallhaven request before it leaves the machine.
-type blockedTransport struct{}
+// ErrDisabled is returned for any request aimed at wallhaven.cc.
+var ErrDisabled = errors.New("wallhaven is disabled in this build")
 
-func (blockedTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errors.New("wallhaven is disabled in this build")
+// blockedTransport fails wallhaven requests before they leave the machine, so
+// no API key is ever transmitted. Other hosts are passed through: Download is a
+// generic downloader that blueprints use for wallpapers hosted elsewhere.
+type blockedTransport struct{ base http.RoundTripper }
+
+func (t blockedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if host := req.URL.Hostname(); host == "wallhaven.cc" || strings.HasSuffix(host, ".wallhaven.cc") {
+		return nil, ErrDisabled
+	}
+	return t.base.RoundTrip(req)
 }
 
 // NewClient creates a new wallhaven API client.
 func NewClient() *Client {
 	return &Client{
-		http: &http.Client{Timeout: 30 * time.Second, Transport: blockedTransport{}},
+		http: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: blockedTransport{base: http.DefaultTransport},
+		},
 	}
 }
 
