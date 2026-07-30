@@ -35,21 +35,27 @@ jobs:
           git remote add upstream "$UPSTREAM_REPO"
           git fetch upstream "$UPSTREAM_BRANCH"
 
-      - name: Fast-forward to upstream
+      - name: Merge upstream into fork
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           local_sha=$(git rev-parse HEAD)
           upstream_sha=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
 
-          if [ "$local_sha" = "$upstream_sha" ]; then
-            echo "Already up to date with upstream ($upstream_sha)."
+          if git merge-base --is-ancestor "$upstream_sha" "$local_sha"; then
+            echo "Already contains upstream/$UPSTREAM_BRANCH ($upstream_sha); nothing to do."
             exit 0
           fi
 
-          if ! git merge-base --is-ancestor "$local_sha" "$upstream_sha"; then
-            echo "::error::Fork has diverged from upstream/$UPSTREAM_BRANCH; refusing to force-push. Reconcile manually."
+          # Fast-forward when the fork has no commits of its own; otherwise a
+          # real merge commit, which keeps fork-only files (this workflow).
+          if ! git merge --no-edit "upstream/$UPSTREAM_BRANCH"; then
+            echo "::error::Merge conflict with upstream/$UPSTREAM_BRANCH. Resolve manually:"
+            git diff --name-only --diff-filter=U
+            git merge --abort
             exit 1
           fi
 
-          git merge --ff-only "upstream/$UPSTREAM_BRANCH"
           git push origin "HEAD:$TARGET_BRANCH"
-          echo "Synced $local_sha -> $upstream_sha"
+          echo "Synced $local_sha -> $(git rev-parse HEAD) (upstream $upstream_sha)"
