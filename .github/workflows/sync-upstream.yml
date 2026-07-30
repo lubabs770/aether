@@ -1,0 +1,55 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    # Every 3 days at 05:17 UTC (odd minute to dodge cron peak load).
+    # Note: day-of-month */3 restarts each month, so the 31st -> 1st gap is 1 day.
+    - cron: "17 5 */3 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/bjarneo/aether.git
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream "$UPSTREAM_BRANCH"
+
+      - name: Fast-forward to upstream
+        run: |
+          local_sha=$(git rev-parse HEAD)
+          upstream_sha=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
+
+          if [ "$local_sha" = "$upstream_sha" ]; then
+            echo "Already up to date with upstream ($upstream_sha)."
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "$local_sha" "$upstream_sha"; then
+            echo "::error::Fork has diverged from upstream/$UPSTREAM_BRANCH; refusing to force-push. Reconcile manually."
+            exit 1
+          fi
+
+          git merge --ff-only "upstream/$UPSTREAM_BRANCH"
+          git push origin "HEAD:$TARGET_BRANCH"
+          echo "Synced $local_sha -> $upstream_sha"
