@@ -53,7 +53,6 @@ func GetAppNameFromFileName(fileName string) string {
 // Settings holds the toggles that control which optional templates are
 // processed and applied.
 type Settings struct {
-	IncludeGtk           bool            `json:"includeGtk"`
 	IncludeZed           bool            `json:"includeZed"`
 	IncludeVscode        bool            `json:"includeVscode"`
 	IncludeNeovim        bool            `json:"includeNeovim"`
@@ -61,15 +60,12 @@ type Settings struct {
 	ExcludedApps         map[string]bool `json:"excludedApps,omitempty"`
 }
 
-// DefaultApplySettings returns the same defaults `aether --generate` uses:
-// Zed / VSCode / Neovim templates rendered, GTK opt-in. Use this anywhere
-// the user is applying a theme without picking per-app toggles explicitly
-// (CLI imports, web-handler silent path, blueprint apply, GUI confirm
-// dialog) so behavior is consistent — a bare `Settings{}` would silently
-// drop neovim.lua and aether.zed.json from the output.
+// DefaultApplySettings returns the same defaults `aether --generate` uses.
+// Use this anywhere the user is applying a theme without picking per-app
+// toggles explicitly so a bare `Settings{}` does not silently drop editor
+// integrations from the output.
 func DefaultApplySettings() Settings {
 	return Settings{
-		IncludeGtk:    false,
 		IncludeZed:    true,
 		IncludeVscode: true,
 		IncludeNeovim: true,
@@ -104,6 +100,10 @@ func NewWriter(fsys embed.FS, dir string) *Writer {
 func prepareThemeDir(targetDir string, state *ThemeState) (string, error) {
 	bgDir := filepath.Join(targetDir, "backgrounds")
 	if err := platform.EnsureDir(bgDir); err != nil {
+		return "", err
+	}
+	// Remove Aether-owned output left by versions that supported GTK styling.
+	if err := removeLegacyGTKStylesheet(filepath.Join(targetDir, "gtk.css")); err != nil {
 		return "", err
 	}
 
@@ -159,13 +159,8 @@ func prepareOmarchyV4ThemeDir(targetDir string, state *ThemeState) (string, erro
 	return prepareThemeDir(targetDir, state)
 }
 
-// applyEditorThemes applies optional editor/toolkit themes (GTK, Zed, VSCode).
+// applyEditorThemes applies optional editor themes (Zed, VSCode).
 func (w *Writer) applyEditorThemes(themeDir string, settings Settings, variables map[string]string) {
-	if settings.IncludeGtk {
-		if err := ApplyGTKTheme(filepath.Join(themeDir, "gtk.css")); err != nil {
-			log.Printf("Warning: GTK theme application failed: %v", err)
-		}
-	}
 	if settings.IncludeZed {
 		if err := ApplyZedTheme(themeDir); err != nil {
 			log.Printf("Warning: Zed theme application failed: %v", err)
@@ -202,8 +197,23 @@ func (w *Writer) processOmarchyV4Templates(
 	)
 }
 
+// GenerateOmarchyV4Only writes the files Omarchy v4 reads directly from a
+// reusable theme folder. Omarchy generates all other app-specific files.
+func (w *Writer) GenerateOmarchyV4Only(state *ThemeState, outputPath string) error {
+	if _, err := prepareOmarchyV4ThemeDir(outputPath, state); err != nil {
+		return err
+	}
+	variables := template.BuildVariables(state.ColorRoles, state.LightMode, state.ExtendedColors)
+	w.processOmarchyV4Templates(outputPath, variables, state.AppOverrides, state.ExtendedColors)
+	return nil
+}
+
 // ApplyTheme generates all theme files and applies the theme to the system.
 func (w *Writer) ApplyTheme(state *ThemeState, settings Settings) (*ApplyResult, error) {
+	if err := RetireLegacyGTKStylesheets(); err != nil {
+		log.Printf("Warning: legacy GTK stylesheet cleanup failed: %v", err)
+	}
+
 	isOmarchy := IsOmarchyInstalled()
 	isOmarchyV4 := isOmarchy && IsOmarchyV4()
 	themeDir := platform.ThemeDir()
@@ -228,6 +238,9 @@ func (w *Writer) ApplyTheme(state *ThemeState, settings Settings) (*ApplyResult,
 	variables := template.BuildVariables(state.ColorRoles, state.LightMode, state.ExtendedColors)
 	if isOmarchyV4 {
 		w.processOmarchyV4Templates(themeDir, variables, state.AppOverrides, state.ExtendedColors)
+		if err := template.ProcessCustomApps(themeDir, variables); err != nil {
+			log.Printf("Warning: custom app processing failed: %v", err)
+		}
 	} else {
 		w.processTemplates(variables, themeDir, settings, state.AppOverrides, state.ExtendedColors)
 		w.applyEditorThemes(themeDir, settings, variables)
@@ -316,11 +329,6 @@ func (w *Writer) processTemplates(
 
 		// Skip aether.zed.json if includeZed is false
 		if fileName == "aether.zed.json" && !settings.IncludeZed {
-			continue
-		}
-
-		// Skip gtk.css if includeGtk is false
-		if fileName == "gtk.css" && !settings.IncludeGtk {
 			continue
 		}
 

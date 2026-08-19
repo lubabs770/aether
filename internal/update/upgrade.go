@@ -9,11 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"aether/internal/platform"
 )
 
-// Upgrade installs release using the same channel that installed Aether when
-// possible. It is intended for a terminal, where package-manager and sudo
-// prompts can be answered by the user.
+// Upgrade installs the latest GitHub release. It is intended for a terminal,
+// where sudo prompts can be answered by the user.
 func Upgrade(ctx context.Context, release Release, stdout, stderr io.Writer) error {
 	if !release.UpdateAvailable {
 		fmt.Fprintf(stdout, "Aether %s is already up to date.\n", release.CurrentVersion)
@@ -23,14 +24,6 @@ func Upgrade(ctx context.Context, release Release, stdout, stderr io.Writer) err
 		return fmt.Errorf("automatic upgrades are currently supported on Linux only")
 	}
 
-	if commandExists("pacman") {
-		for _, helper := range []string{"yay", "paru"} {
-			if commandExists(helper) {
-				return runInteractive(ctx, stdout, stderr, helper, "-S", "aether")
-			}
-		}
-		return fmt.Errorf("Aether is managed by pacman; run your AUR helper to upgrade it")
-	}
 	if isDebianPackageInstalled(ctx) {
 		return installDebianPackage(ctx, release, stdout, stderr)
 	}
@@ -103,7 +96,10 @@ func installDebianPackage(ctx context.Context, release Release, stdout, stderr i
 	}
 	defer cleanup()
 
-	return runInteractive(ctx, stdout, stderr, "sudo", "dpkg", "-i", packagePath)
+	if err := runInteractive(ctx, stdout, stderr, "sudo", "dpkg", "-i", packagePath); err != nil {
+		return err
+	}
+	return registerURLHandler(ctx, stdout, stderr)
 }
 
 func installStandaloneBinary(ctx context.Context, release Release, stdout, stderr io.Writer) error {
@@ -124,9 +120,23 @@ func installStandaloneBinary(ctx context.Context, release Release, stdout, stder
 		return fmt.Errorf("locate current executable: %w", err)
 	}
 	if os.Geteuid() == 0 {
-		return runInteractive(ctx, stdout, stderr, "install", "-m", "755", binaryPath, executable)
+		if err := runInteractive(ctx, stdout, stderr, "install", "-m", "755", binaryPath, executable); err != nil {
+			return err
+		}
+		return registerURLHandler(ctx, stdout, stderr)
 	}
-	return runInteractive(ctx, stdout, stderr, "sudo", "install", "-m", "755", binaryPath, executable)
+	if err := runInteractive(ctx, stdout, stderr, "sudo", "install", "-m", "755", binaryPath, executable); err != nil {
+		return err
+	}
+	return registerURLHandler(ctx, stdout, stderr)
+}
+
+func registerURLHandler(ctx context.Context, stdout, stderr io.Writer) error {
+	if err := platform.EnsureURLHandler(ctx); err != nil {
+		return fmt.Errorf("register aether:// handler: %w", err)
+	}
+	fmt.Fprintln(stdout, "Registered aether:// as the default protocol handler.")
+	return nil
 }
 
 func debianArch() string {

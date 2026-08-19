@@ -111,6 +111,15 @@ func newSeededState() *theme.ThemeState {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	_ = platform.EnsureAllDirs()
+	if err := theme.RetireLegacyGTKStylesheets(); err != nil {
+		log.Printf("retire legacy GTK stylesheets: %v", err)
+	}
+	if err := installDefaultWallpapers(); err != nil {
+		log.Printf("install default wallpapers: %v", err)
+	}
+	if err := platform.EnsureURLHandler(ctx); err != nil {
+		log.Printf("register aether:// handler: %v", err)
+	}
 	a.themeWatcher.Start(ctx)
 
 	// Start IPC server for remote control
@@ -339,6 +348,73 @@ func (a *App) ApplyTheme(req ApplyThemeRequest) (*theme.ApplyResult, error) {
 	}
 
 	return a.writer.ApplyTheme(state, req.Settings)
+}
+
+// SaveAndApplyThemeRequest is the payload for saving the current state as a
+// named theme folder before activating it.
+type SaveAndApplyThemeRequest struct {
+	Name             string                       `json:"name"`
+	UpdateExisting   bool                         `json:"updateExisting"`
+	Palette          []string                     `json:"palette"`
+	WallpaperPath    string                       `json:"wallpaperPath"`
+	LightMode        bool                         `json:"lightMode"`
+	AdditionalImages []string                     `json:"additionalImages"`
+	ExtendedColors   map[string]string            `json:"extendedColors"`
+	Settings         theme.Settings               `json:"settings"`
+	AppOverrides     map[string]map[string]string `json:"appOverrides"`
+}
+
+// SaveAndApplyTheme writes a reusable named theme folder before applying it.
+func (a *App) SaveAndApplyTheme(req SaveAndApplyThemeRequest) (*theme.ApplyResult, error) {
+	name := req.Name
+	if name == "" || name[0] == '-' {
+		return nil, fmt.Errorf("theme name must start with a lowercase letter or digit")
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return nil, fmt.Errorf("theme name must use lowercase letters, digits, and hyphens")
+		}
+	}
+
+	palette, roles := buildColorRoles(req.Palette, req.ExtendedColors)
+	state := &theme.ThemeState{
+		Palette:          palette,
+		WallpaperPath:    req.WallpaperPath,
+		LightMode:        req.LightMode,
+		ColorRoles:       roles,
+		ExtendedColors:   req.ExtendedColors,
+		AdditionalImages: req.AdditionalImages,
+		AppOverrides:     req.AppOverrides,
+	}
+	if state.AppOverrides == nil {
+		state.AppOverrides = make(map[string]map[string]string)
+	}
+
+	targetDir := filepath.Join(platform.SavedThemesDir(), name)
+	if theme.IsOmarchyInstalled() {
+		targetDir = filepath.Join(platform.OmarchyThemesDir(), name)
+	}
+	if _, err := os.Stat(targetDir); err == nil {
+		if !req.UpdateExisting {
+			return nil, fmt.Errorf("theme folder %q already exists", name)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("check theme folder: %w", err)
+	}
+	if err := a.writer.GenerateOmarchyV4Only(state, targetDir); err != nil {
+		return nil, fmt.Errorf("save theme: %w", err)
+	}
+	if !theme.IsOmarchyInstalled() {
+		return a.writer.ApplyTheme(state, req.Settings)
+	}
+	if _, err := platform.RunSync("omarchy-theme-set", name); err != nil {
+		return nil, fmt.Errorf("activate theme: %w", err)
+	}
+	return &theme.ApplyResult{
+		Success:   true,
+		IsOmarchy: true,
+		ThemePath: targetDir,
+	}, nil
 }
 
 // ClearTheme removes the Aether theme and reverts to the default.
@@ -816,7 +892,7 @@ type ExportThemeRequest struct {
 // allExportableApps is the full set of app names that can be exported.
 var allExportableApps = map[string]bool{
 	"alacritty": true, "btop": true, "chromium": true, "colors": true,
-	"foot": true, "ghostty": true, "gtk": true, "hyprland": true, "hyprlock": true,
+	"foot": true, "ghostty": true, "hyprland": true, "hyprlock": true,
 	"icons": true, "kitty": true, "mako": true, "neovim": true,
 	"swayosd": true, "vencord": true, "vscode": true, "walker": true,
 	"warp": true, "waybar": true, "wofi": true, "zed": true,
@@ -873,7 +949,6 @@ func (a *App) ExportTheme(req ExportThemeRequest) (string, error) {
 	}
 
 	settings := theme.Settings{
-		IncludeGtk:    included["gtk"],
 		IncludeZed:    included["zed"],
 		IncludeVscode: included["vscode"],
 		IncludeNeovim: included["neovim"],

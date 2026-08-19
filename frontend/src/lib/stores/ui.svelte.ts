@@ -52,6 +52,7 @@ let colorPickerModel = $state<ColorModel>('oklch');
 let commandPaletteOpen = $state<boolean>(false);
 let keymapOpen = $state<boolean>(false);
 let imageEditorOpen = $state<boolean>(false);
+let applySaveDialogOpen = $state<boolean>(false);
 
 // --- Getters ---
 export function getActiveTab(): Tab {
@@ -261,4 +262,11 @@ export function getImageEditorOpen(): boolean {
 }
 export function setImageEditorOpen(v: boolean): void {
     imageEditorOpen = v;
+}
+
+export function getApplySaveDialogOpen(): boolean {
+    return applySaveDialogOpen;
+}
+export function setApplySaveDialogOpen(v: boolean): void {
+    applySaveDialogOpen = v;
 }
