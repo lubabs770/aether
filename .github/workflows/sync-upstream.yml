@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ env.TARGET_BRANCH }}
           fetch-depth: 0
@@ -48,14 +48,31 @@ jobs:
             exit 0
           fi
 
-          # Fast-forward when the fork has no commits of its own; otherwise a
-          # real merge commit, which keeps fork-only files (this workflow).
-          if ! git merge --no-edit "upstream/$UPSTREAM_BRANCH"; then
-            echo "::error::Merge conflict with upstream/$UPSTREAM_BRANCH. Resolve manually:"
-            git diff --name-only --diff-filter=U
-            git merge --abort
-            exit 1
+          # Always a real merge commit (never a fast-forward): the workflow
+          # fixup below has to land in the same commit as the merge.
+          if ! git merge --no-commit --no-ff "upstream/$UPSTREAM_BRANCH"; then
+            unmerged=$(git diff --name-only --diff-filter=U)
+            outside=$(printf '%s\n' "$unmerged" | grep -v '^\.github/workflows/' || true)
+            if [ -n "$outside" ]; then
+              echo "::error::Merge conflict with upstream/$UPSTREAM_BRANCH. Resolve manually:"
+              printf '%s\n' "$outside"
+              git merge --abort
+              exit 1
+            fi
+            echo "Conflicts confined to .github/workflows/; keeping the fork's copies."
           fi
+
+          # GITHUB_TOKEN has no `workflow` scope, so a push that touches
+          # .github/workflows is rejected outright ("refusing to allow a GitHub
+          # App to create or update workflow ... without `workflows`
+          # permission"). Drop upstream's workflow changes from the merge and
+          # keep the fork's own files verbatim; the fork does not want to run
+          # upstream's release/AUR jobs anyway.
+          git rm -r -q --cached --ignore-unmatch .github/workflows >/dev/null
+          rm -rf .github/workflows
+          git checkout "$local_sha" -- .github/workflows
+
+          git commit --no-edit
 
           git push origin "HEAD:$TARGET_BRANCH"
           echo "Synced $local_sha -> $(git rev-parse HEAD) (upstream $upstream_sha)"
