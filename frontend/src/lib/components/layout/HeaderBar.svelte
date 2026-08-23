@@ -61,7 +61,13 @@
             // Paintbrush / Brush
             icon: '<path d="M18.37 2.63a2.12 2.12 0 0 1 3 3L14 13l-4 1 1-4z"/><path d="M9 14.5A3.5 3.5 0 0 0 5.5 18c-1.2 0-2.5.7-2.5 2 2 0 4.5-1 5.5-3.5"/>',
         },
-    ].filter((t) => t.id !== 'wallhaven'); // Fork: Wallhaven disabled
+    ];
+
+    // Fork: Wallhaven is disabled, so its nav entry is dropped here rather
+    // than by editing the array literal above. Keeping that literal
+    // byte-identical to upstream is what stops every upstream edit to the
+    // tab list from conflicting on the same line during a sync merge.
+    const visibleTabs = tabs.filter((t) => t.id !== 'wallhaven');
 </script>
 
 <header
@@ -115,7 +121,7 @@
         </button>
     {/if}
     <nav class="flex flex-1 justify-end gap-0.5">
-        {#each tabs as tab}
+        {#each visibleTabs as tab}
             <button
                 class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium transition-all duration-100
           {getActiveTab() === tab.id
