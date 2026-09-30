@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UPSTREAM_REPO: https://github.com/bjarneo/aether.git
+  UPSTREAM_REPO: https://github.com/omacom/aether.git
   UPSTREAM_BRANCH: main
   TARGET_BRANCH: main
 
