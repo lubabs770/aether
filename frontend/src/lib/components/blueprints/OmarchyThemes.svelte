@@ -3,7 +3,12 @@
     import {
         setPalette,
         setExtendedColors,
+        setNativeColors,
+        setIconTheme,
         setWallpaperPath,
+        setAdditionalImages,
+        setAppOverrides,
+        setLightMode,
     } from '$lib/stores/theme.svelte';
     import {setActiveTab, showToast} from '$lib/stores/ui.svelte';
     import {
@@ -15,12 +20,19 @@
     import LoadingState from '$lib/components/shared/LoadingState.svelte';
     import ViewHeader from '$lib/components/shared/ViewHeader.svelte';
     import CardSizeToggle from '$lib/components/shared/CardSizeToggle.svelte';
-    import {getCardSize, CARD_MIN_WIDTH} from '$lib/stores/cardsize.svelte';
+    import {getCardSize} from '$lib/stores/cardsize.svelte';
+    import {THEME_CARD_MIN_WIDTH} from './BlueprintCard.svelte';
+    import {
+        getOmarchyCapabilities,
+        refreshOmarchyCapabilities,
+    } from '$lib/stores/omarchy.svelte';
 
     type Theme = omarchy.Theme;
 
     let themes = $state<Theme[]>([]);
     let isLoading = $state(true);
+    let applyingName = $state('');
+    let capabilities = $derived(getOmarchyCapabilities());
 
     onMount(() => {
         loadThemes();
@@ -36,8 +48,9 @@
             themes = Array.isArray(result) ? result : [];
             // Load wallpaper previews into global cache
             for (const theme of themes) {
-                if (theme.wallpapers?.length > 0) {
-                    loadThumbnail(theme.wallpapers[0]);
+                const preview = theme.preview || theme.wallpapers?.[0];
+                if (preview) {
+                    loadThumbnail(preview);
                 }
             }
         } catch {
@@ -51,9 +64,12 @@
         if (theme.colors?.length < 16) return false;
         setPalette(theme.colors);
         setExtendedColors(theme.extendedColors ?? {});
-        if (theme.wallpapers?.length > 0) {
-            setWallpaperPath(theme.wallpapers[0]);
-        }
+        setNativeColors(theme.nativeColors ?? {});
+        setIconTheme(theme.iconTheme, true);
+        if (theme.mode) setLightMode(theme.mode === 'light');
+        setWallpaperPath(theme.wallpapers?.[0] ?? '');
+        setAdditionalImages(theme.wallpapers?.slice(1) ?? []);
+        setAppOverrides({});
         return true;
     }
 
@@ -65,46 +81,65 @@
     }
 
     async function handleApply(theme: Theme) {
-        if (theme.colors?.length >= 16) {
-            loadThemeIntoState(theme);
-        }
+        if (applyingName || !theme.canApply) return;
+        applyingName = theme.name;
         try {
             const {ApplyOmarchyThemeByName} = await import(
                 '../../../../wailsjs/go/main/App'
             );
             await ApplyOmarchyThemeByName(theme.name);
+            await refreshOmarchyCapabilities();
+            await loadThemes();
             showToast(`Applied theme: ${theme.name}`);
-        } catch {
-            showToast('Failed to apply theme');
+        } catch (error: unknown) {
+            const message =
+                typeof error === 'string'
+                    ? error
+                    : error instanceof Error
+                      ? error.message
+                      : 'Failed to apply theme';
+            showToast(message);
+        } finally {
+            applyingName = '';
         }
     }
 </script>
 
+{#snippet tag(label: string, accent = false)}
+    <span
+        class="whitespace-nowrap border px-1.5 py-0.5 text-[10.5px] {accent
+            ? 'border-accent text-accent'
+            : 'border-border text-fg-secondary'}">{label}</span
+    >
+{/snippet}
+
 <div class="flex h-full flex-col">
     <ViewHeader>
-        <span
-            class="text-fg-dimmed text-[10px] font-medium uppercase tracking-wider"
-            >System Themes</span
-        >
+        <h2 class="text-fg-primary text-[13.5px] font-semibold">
+            Omarchy themes
+        </h2>
+        {#if !isLoading}
+            <span class="text-fg-dimmed text-[12px]"
+                >{themes.length} installed{#if capabilities.version}
+                    · Omarchy {capabilities.version}{/if}</span
+            >
+        {/if}
         <div class="ml-auto flex items-center gap-2">
             <CardSizeToggle />
-            {#if !isLoading && themes.length > 0}
-                <span class="text-fg-dimmed text-[10px]">{themes.length}</span>
-            {/if}
         </div>
     </ViewHeader>
 
-    <div class="flex-1 overflow-y-auto p-3">
+    <div class="flex-1 overflow-y-auto p-4">
         {#if isLoading}
             <LoadingState message="Loading system themes…" />
         {:else if themes.length === 0}
             <EmptyState
-                title="No system themes found"
-                body="Install Omarchy to use bundled system themes, or save your own theme as a Blueprint."
+                title="No Omarchy themes found"
+                body="Create a theme in the editor or install one with Omarchy."
             >
                 {#snippet icon()}
                     <svg
-                        class="h-12 w-12"
+                        class="h-6 w-6"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
@@ -124,78 +159,78 @@
         {:else}
             <div
                 class="grid gap-3"
-                style:grid-template-columns="repeat(auto-fill, minmax({CARD_MIN_WIDTH[
+                style:grid-template-columns="repeat(auto-fill, minmax({THEME_CARD_MIN_WIDTH[
                     getCardSize()
                 ]}px, 1fr))"
             >
                 {#each themes as theme, i (theme.name + '_' + i)}
+                    {@const preview = theme.preview || theme.wallpapers?.[0]}
                     <div
-                        class="bg-bg-surface border-border group overflow-hidden border"
+                        class="bg-bg-secondary border-border hover:border-border-focus flex flex-col border transition-colors"
                     >
-                        <!-- Preview image -->
                         <div
-                            class="bg-bg-primary flex aspect-video items-center justify-center overflow-hidden"
+                            class="bg-bg-primary flex aspect-video overflow-hidden"
                         >
-                            {#if theme.wallpapers?.length > 0 && getCachedThumbnail(theme.wallpapers[0])}
+                            {#if preview && getCachedThumbnail(preview)}
                                 <img
-                                    src={getCachedThumbnail(
-                                        theme.wallpapers[0]
-                                    )}
+                                    src={getCachedThumbnail(preview)}
                                     alt={theme.name}
                                     class="h-full w-full object-cover"
                                 />
                             {:else}
-                                <!-- Color strip fallback -->
-                                <div
-                                    class="flex h-full w-full flex-col justify-end"
-                                >
-                                    <div class="flex h-full">
-                                        {#each (theme.colors || []).slice(0, 8) as c}
-                                            <div
-                                                class="flex-1"
-                                                style:background-color={c}
-                                            ></div>
-                                        {/each}
-                                    </div>
-                                </div>
+                                {#each (theme.colors || []).slice(0, 8) as c}
+                                    <span
+                                        class="flex-1"
+                                        style:background-color={c}
+                                    ></span>
+                                {/each}
                             {/if}
                         </div>
 
-                        <!-- Color palette strip -->
-                        <div class="flex h-3">
+                        <div class="flex h-1.5" aria-hidden="true">
                             {#each (theme.colors || []).slice(0, 16) as c}
-                                <div
-                                    class="flex-1"
-                                    style:background-color={c}
-                                ></div>
+                                <span class="flex-1" style:background-color={c}
+                                ></span>
                             {/each}
                         </div>
 
-                        <!-- Info -->
-                        <div class="flex items-center justify-between p-2">
-                            <div>
-                                <span
-                                    class="text-fg-primary text-[11px] font-medium"
-                                    >{theme.name}</span
-                                >
-                                {#if theme.isCurrentTheme}
-                                    <span class="text-accent ml-1 text-[10px]"
-                                        >current</span
-                                    >
-                                {/if}
-                            </div>
-                            <div
-                                class="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100"
+                        <div class="flex flex-col gap-2.5 p-3">
+                            <span
+                                class="text-fg-primary truncate text-[13px] font-semibold"
+                                >{theme.name}</span
                             >
+                            <div class="flex items-center gap-1.5">
+                                <div
+                                    class="flex min-w-0 flex-1 flex-wrap gap-1.5"
+                                >
+                                    {#if theme.isCurrentTheme}
+                                        {@render tag('Current', true)}
+                                    {/if}
+                                    {#if theme.isOverlay}
+                                        {@render tag('Overlay')}
+                                    {/if}
+                                    {#if theme.isAetherGenerated}
+                                        {@render tag('Aether')}
+                                    {/if}
+                                </div>
                                 <button
-                                    class="text-fg-dimmed border-border hover:bg-bg-elevated border px-2 py-1 text-[10px] transition-colors"
+                                    type="button"
+                                    class="border-border text-fg-secondary hover:bg-bg-hover hover:text-fg-primary h-7 border px-2.5 text-[12px] font-medium transition-colors"
                                     onclick={() => handleEdit(theme)}
-                                    >Edit</button
+                                    title="Import colors, icons, and wallpapers into the editor"
+                                    >Import</button
                                 >
                                 <button
-                                    class="bg-accent hover:bg-accent-hover text-accent-fg px-2 py-1 text-[10px] font-medium transition-colors"
+                                    type="button"
+                                    class="bg-accent hover:bg-accent-hover text-accent-fg disabled:bg-bg-elevated disabled:text-fg-dimmed h-7 px-3 text-[12px] font-semibold transition-colors disabled:cursor-default"
                                     onclick={() => handleApply(theme)}
-                                    >Apply</button
+                                    disabled={!!applyingName || !theme.canApply}
+                                    title={theme.canApply
+                                        ? 'Apply with Omarchy'
+                                        : 'This theme is available for editing only'}
+                                    >{applyingName === theme.name
+                                        ? 'Applying...'
+                                        : 'Apply'}</button
                                 >
                             </div>
                         </div>

@@ -1,31 +1,26 @@
 <script lang="ts">
+    import {onDestroy} from 'svelte';
     import AdjustmentSlider from './AdjustmentSlider.svelte';
     import ExpandableSection from '$lib/components/shared/ExpandableSection.svelte';
     import CurvesEditor from '$lib/components/wallpaper-editor/CurvesEditor.svelte';
     import {
         getAdjustments,
+        adjustPalette,
         setAdjustments,
         getPalette,
         getBasePalette,
         setAdjustedPalette,
-        setPalette,
-        getLockedColors,
-        getSelectedColors,
-        hasColorSelection,
-        getSelectedExtColors,
-        hasExtColorSelection,
-        hasAnySelection,
-        getExtendedColors,
         getBaseExtendedColors,
         setAdjustedExtendedColors,
         getPaletteCurvePoints,
         setPaletteCurvePoints,
+        getHistorySnapshot,
+        getThemeRevision,
     } from '$lib/stores/theme.svelte';
     import {pushState} from '$lib/stores/history.svelte';
     import {ADJUSTMENT_LIMITS} from '$lib/constants/colors';
-    import {DEFAULT_ADJUSTMENTS, type Adjustments} from '$lib/types/theme';
+    import {DEFAULT_ADJUSTMENTS} from '$lib/types/theme';
     import {debounce} from '$lib/utils/debounce';
-    import {buildCurveLUT, applyCurveToColors} from '$lib/utils/canvas-filters';
     import {hexToRgb} from '$lib/utils/color';
 
     let adj = $derived(getAdjustments());
@@ -36,7 +31,7 @@
     $effect(() => {
         const stored = getPaletteCurvePoints();
         if (JSON.stringify(stored) !== JSON.stringify(curvePoints)) {
-            curvePoints = stored;
+            curvePoints = stored.map(([x, y]) => [x, y]);
         }
     });
 
@@ -58,8 +53,10 @@
     });
 
     function handleCurveChange() {
-        setPaletteCurvePoints(curvePoints);
-        applyAdjustments(getAdjustments());
+        beginEdit('curve');
+        adjustPalette(getAdjustments(), curvePoints);
+        editRevision = getThemeRevision();
+        endEdit();
     }
 
     const sliderDefs = [
@@ -69,129 +66,52 @@
         {key: 'brightness', label: 'Brightness'},
         {key: 'shadows', label: 'Shadows'},
         {key: 'highlights', label: 'Highlights'},
-        {key: 'hueShift', label: 'Hue Shift'},
+        {key: 'hueShift', label: 'Hue shift'},
         {key: 'temperature', label: 'Temperature'},
         {key: 'tint', label: 'Tint'},
-        {key: 'blackPoint', label: 'Black Point'},
-        {key: 'whitePoint', label: 'White Point'},
+        {key: 'blackPoint', label: 'Black point'},
+        {key: 'whitePoint', label: 'White point'},
         {key: 'gamma', label: 'Gamma'},
     ] as const;
 
-    // Always adjust from basePalette so changes are non-destructive
-    // Respects locked colors, color selection, and palette curve
-    const applyAdjustments = debounce(async (adj: Adjustments) => {
-        const base = getBasePalette();
-        const locked = getLockedColors();
-        const selected = getSelectedColors();
-        const paletteSelActive = hasColorSelection();
-        const selectedExt = getSelectedExtColors();
-        const extSelActive = hasExtColorSelection();
-        const anySelection = hasAnySelection();
-        const baseExt = getBaseExtendedColors();
-        const curveLUT =
-            curvePoints.length > 0 ? buildCurveLUT(curvePoints) : null;
-        try {
-            const {AdjustPaletteColors} = await import(
-                '../../../../wailsjs/go/main/App'
-            );
+    // Push before editing, so Undo works even while a debounce/RPC is pending.
+    let editKind: 'slider' | 'nudge' | 'curve' | null = null;
+    let editRevision = -1;
+    const endEdit = debounce(() => {
+        editKind = null;
+    }, 500);
 
-            // Adjust main palette — skip entirely if only extended colors are selected
-            if (!(anySelection && !paletteSelActive && extSelActive)) {
-                const result = await AdjustPaletteColors(base, adj);
-                if (result && Array.isArray(result) && result.length >= 16) {
-                    let final = result.map((c: string, i: number) => {
-                        if (locked[i]) return base[i];
-                        if (paletteSelActive && !selected[i]) return base[i];
-                        return c;
-                    });
-                    if (curveLUT) {
-                        final = applyCurveToColors(final, curveLUT);
-                    }
-                    setAdjustedPalette(final);
-                }
-            }
-
-            // Adjust extended colors — skip if only palette colors are selected
-            if (!(anySelection && paletteSelActive && !extSelActive)) {
-                const extValues = Object.values(baseExt);
-                const extResult = await AdjustPaletteColors(extValues, adj);
-                if (extResult && Array.isArray(extResult)) {
-                    const extKeys = Object.keys(baseExt);
-                    const adjusted: Record<string, string> = {};
-                    extKeys.forEach((key, i) => {
-                        const val =
-                            extSelActive && !selectedExt[key]
-                                ? baseExt[key]
-                                : extResult[i];
-                        adjusted[key] = val;
-                    });
-                    if (curveLUT) {
-                        const curvedExt = applyCurveToColors(
-                            Object.values(adjusted),
-                            curveLUT
-                        );
-                        Object.keys(adjusted).forEach((key, i) => {
-                            adjusted[key] = curvedExt[i];
-                        });
-                    }
-                    setAdjustedExtendedColors(adjusted);
-                }
-            }
-        } catch (e) {
-            console.error('AdjustPaletteColors failed:', e);
+    function beginEdit(kind: typeof editKind) {
+        if (editKind !== kind || editRevision !== getThemeRevision()) {
+            pushState(getHistorySnapshot());
         }
-    }, 75);
-
-    // Snapshot saved at the START of a drag, before any changes
-    let preDragSnapshot: {
-        palette: string[];
-        ext: Record<string, string>;
-        adj: Adjustments;
-    } | null = null;
+        endEdit.cancel();
+        editKind = kind;
+    }
 
     function handleSliderInput(key: string, value: number) {
-        if (!preDragSnapshot) {
-            preDragSnapshot = {
-                palette: [...getPalette()],
-                ext: {...getExtendedColors()},
-                adj: {...getAdjustments()},
-            };
-        }
+        beginEdit('slider');
         const newAdj = {...getAdjustments(), [key]: value};
-        setAdjustments(newAdj as Adjustments);
-        applyAdjustments(newAdj as Adjustments);
+        adjustPalette(newAdj);
+        editRevision = getThemeRevision();
     }
 
     function handleSliderCommit() {
-        if (preDragSnapshot) {
-            pushState(
-                preDragSnapshot.palette,
-                preDragSnapshot.ext,
-                preDragSnapshot.adj
-            );
-            preDragSnapshot = null;
-        }
+        editKind = null;
     }
 
     function resetAll() {
-        pushState(getPalette(), getExtendedColors(), getAdjustments());
+        endEdit.cancel();
+        editKind = null;
+        pushState(getHistorySnapshot());
         setAdjustments({...DEFAULT_ADJUSTMENTS});
         curvePoints = [];
         setPaletteCurvePoints([]);
-        setPalette(getBasePalette(), true);
+        setAdjustedPalette(getBasePalette());
+        setAdjustedExtendedColors(getBaseExtendedColors());
     }
 
     type AdjustmentKey = (typeof sliderDefs)[number]['key'];
-
-    // Rapid nudge clicks coalesce into a single undo entry — snapshot the
-    // state before the first click in a burst, commit once the user stops.
-    const NUDGE_COMMIT_DELAY_MS = 500;
-    let nudgeSnapshot: {
-        palette: string[];
-        ext: Record<string, string>;
-        adj: Adjustments;
-    } | null = null;
-    let nudgeCommitTimer: ReturnType<typeof setTimeout> | null = null;
 
     function nudge(key: AdjustmentKey, delta: number) {
         const current = getAdjustments();
@@ -202,29 +122,16 @@
         );
         if (next === current[key]) return;
 
-        if (!nudgeSnapshot) {
-            nudgeSnapshot = {
-                palette: [...getPalette()],
-                ext: {...getExtendedColors()},
-                adj: {...current},
-            };
-        }
-        if (nudgeCommitTimer) clearTimeout(nudgeCommitTimer);
-        nudgeCommitTimer = setTimeout(() => {
-            if (nudgeSnapshot) {
-                pushState(
-                    nudgeSnapshot.palette,
-                    nudgeSnapshot.ext,
-                    nudgeSnapshot.adj
-                );
-                nudgeSnapshot = null;
-            }
-        }, NUDGE_COMMIT_DELAY_MS);
-
-        const newAdj = {...current, [key]: next} as Adjustments;
-        setAdjustments(newAdj);
-        applyAdjustments(newAdj);
+        beginEdit('nudge');
+        const newAdj = {...current, [key]: next};
+        adjustPalette(newAdj);
+        editRevision = getThemeRevision();
+        endEdit();
     }
+
+    onDestroy(() => {
+        endEdit.cancel();
+    });
 
     const VARIANTS: {
         label: string;
@@ -237,60 +144,102 @@
         {label: '−S', title: 'Desaturate 15%', key: 'saturation', delta: -15},
         {label: '+S', title: 'Saturate 15%', key: 'saturation', delta: 15},
         {
-            label: '❄',
+            label: 'Cool',
             title: 'Cooler (temperature −15)',
             key: 'temperature',
             delta: -15,
         },
         {
-            label: '☀',
+            label: 'Warm',
             title: 'Warmer (temperature +15)',
             key: 'temperature',
             delta: 15,
         },
     ];
+
+    // The first six sliders are always visible. The other sliders show when
+    // the user expands the list or when their value is not the default, so
+    // a nudge never changes a hidden slider.
+    const PRIMARY_SLIDER_COUNT = 6;
+    let showAllSliders = $state(false);
+    function isChanged(key: AdjustmentKey): boolean {
+        return adj[key] !== ADJUSTMENT_LIMITS[key].default;
+    }
+    let visibleSliders = $derived(
+        sliderDefs.filter(
+            (def, i) =>
+                showAllSliders || i < PRIMARY_SLIDER_COUNT || isChanged(def.key)
+        )
+    );
+    let changedCount = $derived(
+        sliderDefs.filter(def => isChanged(def.key)).length +
+            (curvePoints.length > 0 ? 1 : 0)
+    );
 </script>
 
-<ExpandableSection title="Color Adjustments" bind:expanded>
-    <div class="mb-3">
+<ExpandableSection
+    title="Color adjustments"
+    suffix={changedCount > 0 ? `${changedCount} changed` : ''}
+    suffixAccent
+    bind:expanded
+>
+    <div class="flex flex-col gap-3.5">
         <CurvesEditor
             bind:points={curvePoints}
             histogram={paletteHistogram}
             onchange={handleCurveChange}
+            height={124}
+            label="Curve"
+            compact
         />
-    </div>
 
-    <div class="mb-2 flex items-center justify-between gap-2">
-        <div class="flex gap-1">
+        <div class="flex items-center gap-1">
             {#each VARIANTS as v}
                 <button
                     type="button"
-                    class="text-fg-secondary hover:text-fg-primary border-border hover:bg-bg-surface border px-1.5 py-0.5 text-[10px] tabular-nums transition-colors"
+                    class="border-border text-fg-secondary hover:border-border-focus hover:text-fg-primary h-6 border px-[7px] font-mono text-[10.5px] font-medium transition-colors"
                     onclick={() => nudge(v.key, v.delta)}
                     title={v.title}
                     aria-label={v.title}>{v.label}</button
                 >
             {/each}
+            <span class="flex-1"></span>
+            <button
+                type="button"
+                class="text-fg-dimmed hover:text-fg-primary text-[11px] transition-colors"
+                onclick={resetAll}
+                title="Reset all adjustments and the curve"
+            >
+                Reset
+            </button>
         </div>
-        <button
-            class="text-fg-dimmed hover:text-fg-secondary text-[10px]"
-            onclick={resetAll}
-        >
-            Reset All
-        </button>
-    </div>
-    <div class="flex flex-col gap-1.5">
-        {#each sliderDefs as def}
-            <AdjustmentSlider
-                label={def.label}
-                value={adj[def.key]}
-                min={ADJUSTMENT_LIMITS[def.key].min}
-                max={ADJUSTMENT_LIMITS[def.key].max}
-                step={ADJUSTMENT_LIMITS[def.key].step}
-                defaultValue={ADJUSTMENT_LIMITS[def.key].default}
-                oninput={v => handleSliderInput(def.key, v)}
-                oncommit={handleSliderCommit}
-            />
-        {/each}
+
+        <div class="flex flex-col gap-2.5">
+            {#each visibleSliders as def (def.key)}
+                <AdjustmentSlider
+                    label={def.label}
+                    value={adj[def.key]}
+                    min={ADJUSTMENT_LIMITS[def.key].min}
+                    max={ADJUSTMENT_LIMITS[def.key].max}
+                    step={ADJUSTMENT_LIMITS[def.key].step}
+                    defaultValue={ADJUSTMENT_LIMITS[def.key].default}
+                    oninput={v => handleSliderInput(def.key, v)}
+                    oncommit={handleSliderCommit}
+                />
+            {/each}
+        </div>
+
+        {#if showAllSliders || visibleSliders.length < sliderDefs.length}
+            <button
+                type="button"
+                class="text-accent hover:text-accent-hover self-start text-[11.5px] transition-colors"
+                onclick={() => (showAllSliders = !showAllSliders)}
+                aria-expanded={showAllSliders}
+            >
+                {showAllSliders
+                    ? 'Show fewer'
+                    : `Show all ${sliderDefs.length} sliders`}
+            </button>
+        {/if}
     </div>
 </ExpandableSection>

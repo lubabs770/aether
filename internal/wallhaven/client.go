@@ -1,13 +1,16 @@
 package wallhaven
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
-	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -15,9 +18,15 @@ import (
 	"time"
 
 	"aether/internal/platform"
+	"aether/internal/wallpaper"
 )
 
-const baseURL = "https://wallhaven.cc/api/v1"
+const (
+	baseURL                   = "https://wallhaven.cc/api/v1"
+	maxAPIResponseBytes int64 = 4 << 20
+	maxErrorBytes       int64 = 4 << 10
+	maxThumbnailBytes   int64 = 5 << 20
+)
 
 // Client is an HTTP client for the wallhaven.cc API.
 type Client struct {
@@ -25,29 +34,36 @@ type Client struct {
 	apiKey string
 }
 
-// ErrDisabled is returned for any request aimed at wallhaven.cc.
+// ErrDisabled is returned for any connection aimed at wallhaven.cc.
 var ErrDisabled = errors.New("wallhaven is disabled in this build")
 
-// blockedTransport fails wallhaven requests before they leave the machine, so
-// no API key is ever transmitted. Other hosts are passed through: Download is a
-// generic downloader that blueprints use for wallpapers hosted elsewhere.
-type blockedTransport struct{ base http.RoundTripper }
-
-func (t blockedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if host := req.URL.Hostname(); host == "wallhaven.cc" || strings.HasSuffix(host, ".wallhaven.cc") {
-		return nil, ErrDisabled
+// blockWallhavenDial refuses to open connections to wallhaven hosts, so no
+// request (and no API key) ever leaves the machine. Other hosts are passed
+// through: Download is a generic downloader that blueprints use for
+// wallpapers hosted elsewhere. Guarding the dialer rather than wrapping the
+// RoundTripper keeps upstream's *http.Transport (and its public-address
+// policy) intact.
+func blockWallhavenDial(t *http.Transport) {
+	dial := t.DialContext
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+		host = strings.ToLower(strings.TrimSuffix(host, "."))
+		if host == "wallhaven.cc" || strings.HasSuffix(host, ".wallhaven.cc") {
+			return nil, ErrDisabled
+		}
+		return dial(ctx, network, addr)
 	}
-	return t.base.RoundTrip(req)
 }
 
 // NewClient creates a new wallhaven API client.
 func NewClient() *Client {
-	return &Client{
-		http: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: blockedTransport{base: http.DefaultTransport},
-		},
-	}
+	client := wallpaper.NewPublicHTTPClient()
+	client.Timeout = 30 * time.Second
+	blockWallhavenDial(client.Transport.(*http.Transport))
+	return &Client{http: client}
 }
 
 // SetAPIKey sets the optional API key used for authenticated requests.
@@ -103,20 +119,9 @@ func (c *Client) Search(params SearchParams) (*SearchResult, error) {
 
 	reqURL := baseURL + "/search?" + q.Encode()
 
-	resp, err := c.http.Get(reqURL)
-	if err != nil {
-		return nil, fmt.Errorf("wallhaven search request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("wallhaven API returned %d: %s", resp.StatusCode, string(body))
-	}
-
 	var result SearchResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode wallhaven response: %w", err)
+	if err := c.getJSON(reqURL, &result); err != nil {
+		return nil, err
 	}
 
 	return &result, nil
@@ -176,51 +181,36 @@ func (c *Client) SearchMultiPage(params SearchParams, numPages int) (*SearchResu
 }
 
 // wallhavenPagePattern matches wallhaven.cc page URLs and extracts the ID.
-var wallhavenPagePattern = regexp.MustCompile(`wallhaven\.cc/w/([a-zA-Z0-9]+)`)
+var wallhavenPagePattern = regexp.MustCompile(`^/w/([a-zA-Z0-9]+)/?$`)
+var wallhavenIDPattern = regexp.MustCompile(`^[a-zA-Z0-9]+$`)
 
 // ResolveImageURL resolves a wallhaven page URL (e.g. https://wallhaven.cc/w/j3qv85)
 // to the direct image URL by querying the wallhaven API. If the URL is already a
 // direct image URL it is returned as-is.
 func (c *Client) ResolveImageURL(wallpaperURL string) (string, error) {
-	// If it's already a direct image URL, return it.
-	if !wallhavenPagePattern.MatchString(wallpaperURL) {
+	if err := wallpaper.ValidateRemoteURL(wallpaperURL); err != nil {
+		return "", err
+	}
+	u, _ := url.Parse(wallpaperURL)
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	matches := wallhavenPagePattern.FindStringSubmatch(u.Path)
+	if (host != "wallhaven.cc" && host != "www.wallhaven.cc") || matches == nil {
 		return wallpaperURL, nil
 	}
 
-	matches := wallhavenPagePattern.FindStringSubmatch(wallpaperURL)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("cannot extract wallpaper ID from URL: %s", wallpaperURL)
-	}
 	id := matches[1]
-
-	reqURL := baseURL + "/w/" + id
-	if c.apiKey != "" {
-		reqURL += "?apikey=" + url.QueryEscape(c.apiKey)
-	}
-
-	resp, err := c.http.Get(reqURL)
+	info, err := c.Info(id)
 	if err != nil {
-		return "", fmt.Errorf("wallhaven API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("wallhaven API returned %d: %s", resp.StatusCode, string(body))
+		return "", err
 	}
 
-	var result struct {
-		Data WallpaperInfo `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode wallhaven response: %w", err)
-	}
-
-	if result.Data.Path == "" {
+	if info.Path == "" {
 		return "", fmt.Errorf("wallhaven API returned no image path for %s", id)
 	}
-
-	return result.Data.Path, nil
+	if err := wallpaper.ValidateRemoteURL(info.Path); err != nil {
+		return "", fmt.Errorf("invalid wallhaven image URL: %w", err)
+	}
+	return info.Path, nil
 }
 
 // DownloadFromURL resolves a wallhaven URL (page or direct) and downloads the
@@ -237,53 +227,14 @@ func (c *Client) DownloadFromURL(wallpaperURL string) (string, error) {
 // dir under ~/.cache/aether/wallhaven-thumbs and returns the local path. Cached
 // hits skip the HTTP round-trip.
 func (c *Client) DownloadThumb(thumbURL string) (string, error) {
-	if thumbURL == "" {
-		return "", fmt.Errorf("empty thumbnail URL")
-	}
-
-	filename := filepath.Base(thumbURL)
-	if filename == "" || filename == "." || filename == "/" {
-		return "", fmt.Errorf("cannot determine filename from URL: %s", thumbURL)
-	}
-
 	destDir := filepath.Join(platform.CacheDir(), "wallhaven-thumbs")
-	if err := platform.EnsureDir(destDir); err != nil {
-		return "", fmt.Errorf("failed to create thumb dir: %w", err)
-	}
-
-	destPath := filepath.Join(destDir, filename)
-	if platform.FileExists(destPath) {
-		return destPath, nil
-	}
-
-	resp, err := c.http.Get(thumbURL)
-	if err != nil {
-		return "", fmt.Errorf("thumb download failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("thumb download returned HTTP %d for %s", resp.StatusCode, thumbURL)
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create file %s: %w", destPath, err)
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		_ = os.Remove(destPath)
-		return "", fmt.Errorf("failed to write thumb: %w", err)
-	}
-
-	return destPath, nil
+	return c.download(thumbURL, destDir, maxThumbnailBytes)
 }
 
 // Info fetches metadata for a single wallpaper by its wallhaven ID.
 func (c *Client) Info(id string) (*WallpaperInfo, error) {
-	if id == "" {
-		return nil, fmt.Errorf("empty wallpaper id")
+	if !wallhavenIDPattern.MatchString(id) {
+		return nil, fmt.Errorf("invalid wallpaper id %q", id)
 	}
 
 	reqURL := baseURL + "/w/" + id
@@ -291,22 +242,11 @@ func (c *Client) Info(id string) (*WallpaperInfo, error) {
 		reqURL += "?apikey=" + url.QueryEscape(c.apiKey)
 	}
 
-	resp, err := c.http.Get(reqURL)
-	if err != nil {
-		return nil, fmt.Errorf("wallhaven API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("wallhaven API returned %d: %s", resp.StatusCode, string(body))
-	}
-
 	var result struct {
 		Data WallpaperInfo `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode wallhaven response: %w", err)
+	if err := c.getJSON(reqURL, &result); err != nil {
+		return nil, err
 	}
 
 	return &result.Data, nil
@@ -315,44 +255,71 @@ func (c *Client) Info(id string) (*WallpaperInfo, error) {
 // Download downloads a wallpaper image to the local downloads directory.
 // Returns the local file path.
 func (c *Client) Download(imageURL string) (string, error) {
-	filename := filepath.Base(imageURL)
-	if filename == "" || filename == "." || filename == "/" {
-		return "", fmt.Errorf("cannot determine filename from URL: %s", imageURL)
-	}
+	return c.DownloadContext(context.Background(), imageURL)
+}
 
-	destDir := platform.DownloadDir()
-	if err := platform.EnsureDir(destDir); err != nil {
-		return "", fmt.Errorf("failed to create download directory: %w", err)
-	}
+// DownloadContext downloads a wallpaper with cancellation and the shared network limits.
+func (c *Client) DownloadContext(ctx context.Context, imageURL string) (string, error) {
+	return c.downloadContext(ctx, imageURL, platform.DownloadDir(), wallpaper.MaxImageBytes)
+}
 
+func (c *Client) download(rawURL, destDir string, maxBytes int64) (string, error) {
+	return c.downloadContext(context.Background(), rawURL, destDir, maxBytes)
+}
+
+func (c *Client) downloadContext(ctx context.Context, rawURL, destDir string, maxBytes int64) (string, error) {
+	if err := wallpaper.ValidateRemoteURL(rawURL); err != nil {
+		return "", err
+	}
+	u, _ := url.Parse(rawURL)
+	filename := path.Base(u.Path)
+	if filename == "." || filename == ".." || filename == "/" ||
+		strings.ContainsAny(filename, "\\\x00") {
+		return "", fmt.Errorf("invalid download filename")
+	}
 	destPath := filepath.Join(destDir, filename)
-
-	// If the file already exists, return it directly.
-	if platform.FileExists(destPath) {
-		return destPath, nil
+	host := strings.ToLower(u.Hostname())
+	if host != "wallhaven.cc" && !strings.HasSuffix(host, ".wallhaven.cc") {
+		sum := sha256.Sum256([]byte(rawURL))
+		ext := path.Ext(u.Path)
+		if len(ext) > 8 {
+			ext = ""
+		}
+		destPath = filepath.Join(destDir, fmt.Sprintf("%x%s", sum[:8], ext))
 	}
+	client := *c.http
+	if maxBytes == wallpaper.MaxImageBytes {
+		client.Timeout = 5 * time.Minute
+	}
+	if err := wallpaper.DownloadFileContext(ctx, &client, rawURL, destPath, maxBytes); err != nil {
+		return "", err
+	}
+	return destPath, nil
+}
 
-	resp, err := c.http.Get(imageURL)
+func (c *Client) getJSON(reqURL string, result any) error {
+	resp, err := c.http.Get(reqURL)
 	if err != nil {
-		return "", fmt.Errorf("wallpaper download failed: %w", err)
+		return fmt.Errorf("wallhaven API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download returned HTTP %d for %s", resp.StatusCode, imageURL)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
+		return fmt.Errorf("wallhaven API returned %d: %s", resp.StatusCode, body)
 	}
-
-	out, err := os.Create(destPath)
+	if resp.ContentLength > maxAPIResponseBytes {
+		return fmt.Errorf("wallhaven response exceeds %d-byte limit", maxAPIResponseBytes)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("failed to create file %s: %w", destPath, err)
+		return fmt.Errorf("failed to read wallhaven response: %w", err)
 	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		// Clean up partial file on error.
-		_ = os.Remove(destPath)
-		return "", fmt.Errorf("failed to write wallpaper: %w", err)
+	if int64(len(body)) > maxAPIResponseBytes {
+		return fmt.Errorf("wallhaven response exceeds %d-byte limit", maxAPIResponseBytes)
 	}
-
-	return destPath, nil
+	if err := json.Unmarshal(body, result); err != nil {
+		return fmt.Errorf("failed to decode wallhaven response: %w", err)
+	}
+	return nil
 }

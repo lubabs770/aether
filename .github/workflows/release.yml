@@ -25,7 +25,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25'
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -38,7 +38,7 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
 
       - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
 
       - name: Update version from tag
         run: |
@@ -66,12 +66,22 @@ jobs:
           mkdir -p "${PKG_DIR}/DEBIAN"
           mkdir -p "${PKG_DIR}/usr/bin"
           mkdir -p "${PKG_DIR}/usr/share/applications"
+          mkdir -p "${PKG_DIR}/usr/share/icons/hicolor/512x512/apps"
           mkdir -p "${PKG_DIR}/usr/share/pixmaps"
 
           cp "build/bin/aether-linux-${ARCH}" "${PKG_DIR}/usr/bin/aether"
           chmod 755 "${PKG_DIR}/usr/bin/aether"
           cp build/linux/aether.desktop "${PKG_DIR}/usr/share/applications/"
+          cp li.oever.aether.url-handler.desktop "${PKG_DIR}/usr/share/applications/"
           cp icon.png "${PKG_DIR}/usr/share/pixmaps/aether.png"
+          cp assets/aether-icon-512.png "${PKG_DIR}/usr/share/icons/hicolor/512x512/apps/aether.png"
+          install -Dm755 contrib/quickshell/install.sh "${PKG_DIR}/usr/bin/aether-install-omarchy-plugins"
+          install -Dm644 contrib/quickshell/wallpapers/manifest.json "${PKG_DIR}/usr/share/aether/omarchy-plugins/wallpapers/manifest.json"
+          install -Dm644 contrib/quickshell/wallpapers/shell.qml "${PKG_DIR}/usr/share/aether/omarchy-plugins/wallpapers/shell.qml"
+          install -Dm644 contrib/quickshell/wallpapers/WallpaperSlider.qml "${PKG_DIR}/usr/share/aether/omarchy-plugins/wallpapers/WallpaperSlider.qml"
+          install -Dm644 contrib/quickshell/blueprints/manifest.json "${PKG_DIR}/usr/share/aether/omarchy-plugins/blueprints/manifest.json"
+          install -Dm644 contrib/quickshell/blueprints/shell.qml "${PKG_DIR}/usr/share/aether/omarchy-plugins/blueprints/shell.qml"
+          install -Dm644 contrib/quickshell/blueprints/Blueprints.qml "${PKG_DIR}/usr/share/aether/omarchy-plugins/blueprints/Blueprints.qml"
 
           cat > "${PKG_DIR}/DEBIAN/control" <<'CTRL'
           Package: aether
@@ -82,7 +92,7 @@ jobs:
           Description: Desktop theming application
            Extract colors from wallpapers and apply cohesive themes across your
            desktop.
-          Homepage: https://github.com/bjarneo/aether
+          Homepage: https://github.com/omacom/aether
           CTRL
           sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
           sed -i "s/PKGVER/${PKG_VERSION}/" "${PKG_DIR}/DEBIAN/control"
@@ -186,36 +196,36 @@ jobs:
 
             ### Debian / Ubuntu (x86_64)
             ```bash
-            wget https://github.com/bjarneo/aether/releases/download/${{ github.ref_name }}/aether_${{ steps.archive.outputs.pkgver }}_amd64.deb
+            wget https://github.com/omacom/aether/releases/download/${{ github.ref_name }}/aether_${{ steps.archive.outputs.pkgver }}_amd64.deb
             sudo dpkg -i aether_${{ steps.archive.outputs.pkgver }}_amd64.deb
             sudo apt-get install -f
             ```
 
             ### Debian / Ubuntu (aarch64)
             ```bash
-            wget https://github.com/bjarneo/aether/releases/download/${{ github.ref_name }}/aether_${{ steps.archive.outputs.pkgver }}_arm64.deb
+            wget https://github.com/omacom/aether/releases/download/${{ github.ref_name }}/aether_${{ steps.archive.outputs.pkgver }}_arm64.deb
             sudo dpkg -i aether_${{ steps.archive.outputs.pkgver }}_arm64.deb
             sudo apt-get install -f
             ```
 
             ### Pre-built Binary (x86_64)
             ```bash
-            wget https://github.com/bjarneo/aether/releases/download/${{ github.ref_name }}/aether-linux-amd64
+            wget https://github.com/omacom/aether/releases/download/${{ github.ref_name }}/aether-linux-amd64
             chmod +x aether-linux-amd64
             sudo mv aether-linux-amd64 /usr/local/bin/aether
             ```
 
             ### Pre-built Binary (aarch64)
             ```bash
-            wget https://github.com/bjarneo/aether/releases/download/${{ github.ref_name }}/aether-linux-arm64
+            wget https://github.com/omacom/aether/releases/download/${{ github.ref_name }}/aether-linux-arm64
             chmod +x aether-linux-arm64
             sudo mv aether-linux-arm64 /usr/local/bin/aether
             ```
 
             ### Build from Source
-            Requires Go 1.23+, Node.js 22+, and [Wails](https://wails.io/docs/gettingstarted/installation).
+            Requires Go 1.25+, Node.js 22+, and [Wails](https://wails.io/docs/gettingstarted/installation).
             ```bash
-            git clone https://github.com/bjarneo/aether.git
+            git clone https://github.com/omacom/aether.git
             cd aether
             make build
             ```

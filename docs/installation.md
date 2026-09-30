@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- **Go** 1.23+
+- **Go** 1.25+
 - **webkit2gtk** (GUI runtime)
 - **Node.js** 18+ (build only)
 
@@ -16,7 +16,7 @@ paru -S aether
 
 ## Debian / Ubuntu
 
-Download the `.deb` package from the [latest release](https://github.com/omacom-io/aether/releases/latest):
+Download the `.deb` package from the [latest release](https://github.com/omacom/aether/releases/latest):
 
 ```bash
 sudo dpkg -i aether_*.deb
@@ -25,11 +25,21 @@ sudo apt-get install -f
 
 The `.deb` package includes the `aether` binary and pulls in required runtime dependencies automatically.
 
+## Omarchy Shell Selectors
+
+On Omarchy, install the native wallpaper and blueprint selectors after installing Aether:
+
+```bash
+aether-install-omarchy-plugins
+```
+
+Source builds install them automatically with `make install`, or separately with `make install-omarchy-plugins`. See [Omarchy shell plugins](quickshell.md) for keybinds and controls.
+
 ## macOS
 
 ### Requirements
 
-- **Go** 1.23+
+- **Go** 1.25+
 - **Wails CLI** (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`)
 - **Node.js** 18+
 - **Xcode Command Line Tools**: `xcode-select --install`
@@ -37,7 +47,7 @@ The `.deb` package includes the `aether` binary and pulls in required runtime de
 ### Build
 
 ```bash
-git clone https://github.com/omacom-io/aether.git
+git clone https://github.com/omacom/aether.git
 cd aether && make build
 ```
 
@@ -72,7 +82,7 @@ sudo apt install golang libgtk-3-dev libwebkit2gtk-4.1-dev nodejs npm pkg-config
 ### Build
 
 ```bash
-git clone https://github.com/omacom-io/aether.git
+git clone https://github.com/omacom/aether.git
 cd aether && make build
 ```
 

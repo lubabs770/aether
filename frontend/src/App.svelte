@@ -1,17 +1,20 @@
 <script lang="ts">
-    import {onMount} from 'svelte';
+    import {onMount, onDestroy} from 'svelte';
     import {fade} from 'svelte/transition';
     import HeaderBar from '$lib/components/layout/HeaderBar.svelte';
     import ActionBar from '$lib/components/layout/ActionBar.svelte';
     import TargetAppsStrip from '$lib/components/layout/TargetAppsStrip.svelte';
     import ThemeEditor from '$lib/components/editor/ThemeEditor.svelte';
     import WallhavenBrowser from '$lib/components/wallhaven/WallhavenBrowser.svelte';
+    import GitHubBrowser from '$lib/components/github/GitHubBrowser.svelte';
     import LocalBrowser from '$lib/components/local/LocalBrowser.svelte';
     import FavoritesView from '$lib/components/favorites/FavoritesView.svelte';
     import BlueprintsView from '$lib/components/blueprints/BlueprintsView.svelte';
     import OmarchyThemes from '$lib/components/blueprints/OmarchyThemes.svelte';
     import SettingsView from '$lib/components/settings/SettingsView.svelte';
     import AboutView from '$lib/components/layout/AboutView.svelte';
+    import ExportProgress from '$lib/components/favorites/ExportProgress.svelte';
+    import {initExportEvents} from '$lib/stores/favoritesExport.svelte';
     import {
         getActiveTab,
         setActiveTab,
@@ -32,6 +35,8 @@
         toggleKeymap,
         toggleSidebar,
         getLiveApply,
+        getLiveApplySession,
+        invalidateLiveApplySession,
         setLivePending,
         getTargetsVisible,
         getApplySaveDialogOpen,
@@ -42,6 +47,7 @@
     const VALID_TABS: readonly Tab[] = [
         'editor',
         'wallhaven',
+        'github',
         'local',
         'favorites',
         'blueprints',
@@ -53,25 +59,32 @@
         (VALID_TABS as readonly string[]).includes(t);
     import {
         setWallpaperPath,
+        setWallpaperBlur,
         setPalette,
         setExtendedColors,
+        setNativeColors,
+        setIconTheme,
         setAdjustments,
         setColor,
         setExtendedColor,
         setAppOverride,
+        setAppOverrides,
+        setAdditionalImages,
         setLightMode,
         setExtractionMode,
         getThemeSnapshot,
         getThemeSignature,
+        getLastAppliedSignature,
+        getIsApplying,
+        getIsAdjusting,
+        getIsExtracting,
         setLastExtractedPath,
     } from '$lib/stores/theme.svelte';
     import {debounce} from '$lib/utils/debounce';
     import {STORAGE_KEYS} from '$lib/constants/storage';
-    import {pushState} from '$lib/stores/history.svelte';
     import {
         applyTheme,
         applyThemeLive,
-        saveAndApplyTheme,
         requestThemeApply,
         saveThemeAsNew,
         undoAction,
@@ -99,9 +112,21 @@
     import {prefersReducedMotion} from '$lib/utils/browser';
     import {buildCommands} from '$lib/commands/commands.svelte';
     import type {main} from '../wailsjs/go/models';
+    import {
+        getOmarchyAvailable,
+        initOmarchyCapabilities,
+    } from '$lib/stores/omarchy.svelte';
 
     let activeTab = $derived(getActiveTab());
-    let commands = $derived(buildCommands());
+    // Fork: Wallhaven is disabled. Its palette entry is dropped here rather
+    // than inside buildCommands()' list, so upstream edits to that list merge
+    // cleanly.
+    let commands = $derived(
+        buildCommands().filter(c => c.id !== 'nav.wallhaven')
+    );
+    let omarchyAvailable = $derived(getOmarchyAvailable());
+
+    void initOmarchyCapabilities();
 
     const TAB_FADE_DURATION = prefersReducedMotion() ? 0 : 100;
 
@@ -109,21 +134,20 @@
     // visually layered on any theme bg.
     const BG_SECONDARY_SHIFT = 10;
     // CSS tokens layered over bg-primary, paired with their alpha values
-    // for light and dark backgrounds. Order: [token, lightAlpha, darkAlpha].
-    // [token, lightBgAlpha, darkBgAlpha]. Light-bg alphas are roughly 2x dark
-    // because dark-on-light surfaces need more weight than light-on-dark to
-    // achieve equivalent visual separation from the page background.
+    // for light and dark backgrounds. Order: [token, lightBgAlpha,
+    // darkBgAlpha]. The values match the tokens in app.css. Borders need
+    // more alpha on a light bg to separate panels from the page.
     const OVERLAY_TOKENS: ReadonlyArray<[string, number, number]> = [
-        ['--color-bg-surface', 0.06, 0.04],
-        ['--color-bg-elevated', 0.09, 0.07],
-        ['--color-bg-hover', 0.07, 0.05],
-        ['--color-border', 0.16, 0.08],
-        ['--color-border-focus', 0.3, 0.18],
+        ['--color-bg-surface', 0.03, 0.035],
+        ['--color-bg-elevated', 0.065, 0.075],
+        ['--color-bg-hover', 0.05, 0.055],
+        ['--color-border', 0.11, 0.075],
+        ['--color-border-focus', 0.28, 0.2],
     ];
     // Design alpha for fg-secondary/dimmed; bumped at apply-time when needed
     // to satisfy WCAG against the actual theme bg/fg pair.
-    const FG_SECONDARY_DESIGN_ALPHA = 0.75;
-    const FG_DIMMED_DESIGN_ALPHA = 0.5;
+    const FG_SECONDARY_DESIGN_ALPHA = 0.74;
+    const FG_DIMMED_DESIGN_ALPHA = 0.52;
     const WCAG_AA_RATIO = 4.5;
     const WCAG_AA_LARGE_RATIO = 3;
 
@@ -143,43 +167,152 @@
         );
     });
 
-    // Live-preview apply. Tracks the snapshot signature so we don't fire
-    // on object-identity churn. `null` baseline doubles as the
-    // not-yet-armed flag — first read just records the signature.
-    // Long enough to coalesce slider drags but short enough to feel "live".
+    // Arming records the initial state without applying it. Queuing is not an
+    // acknowledgement: only a completed apply advances the applied signature.
     const LIVE_APPLY_DEBOUNCE_MS = 1500;
-    let lastLiveSignature: string | null = null;
-    const debouncedLiveApply = debounce(() => {
-        applyThemeLive();
+    let initialStateLoaded = $state(false);
+    let initialLiveSignature = '';
+    type LiveAttempt = {signature: string; session: number};
+    let queuedLive: LiveAttempt | null = null;
+    let lastLiveAttempt = $state.raw<LiveAttempt | null>(null);
+    const debouncedLiveApply = debounce(async () => {
+        const attempt = queuedLive;
+        queuedLive = null;
+        if (
+            !attempt ||
+            !getLiveApply() ||
+            attempt.session !== getLiveApplySession() ||
+            attempt.signature !== getThemeSignature() ||
+            getIsApplying() ||
+            getIsAdjusting() ||
+            getIsExtracting()
+        )
+            return;
+        lastLiveAttempt = attempt;
+        const result = await applyThemeLive();
+        if (result !== 'failed' && lastLiveAttempt === attempt)
+            lastLiveAttempt = null;
     }, LIVE_APPLY_DEBOUNCE_MS);
     $effect(() => {
         const enabled = getLiveApply();
-        // Once armed, skip the JSON.stringify when the toggle is off.
-        // The first run still reads sig to establish the baseline.
-        if (!enabled && lastLiveSignature !== null) return;
-        const sig = getThemeSignature();
-        if (lastLiveSignature === null) {
-            lastLiveSignature = sig;
+        const session = getLiveApplySession();
+        const signature = getThemeSignature();
+        const applied = getLastAppliedSignature();
+        if (
+            lastLiveAttempt &&
+            (lastLiveAttempt.signature !== signature ||
+                lastLiveAttempt.session !== session ||
+                lastLiveAttempt.signature === applied)
+        ) {
+            lastLiveAttempt = null;
+        }
+        if (!initialStateLoaded) initialLiveSignature = signature;
+        if (
+            !initialStateLoaded ||
+            !enabled ||
+            signature === (applied || initialLiveSignature)
+        ) {
+            debouncedLiveApply.cancel();
+            queuedLive = null;
+            setLivePending(false);
             return;
         }
-        if (sig === lastLiveSignature) return;
-        lastLiveSignature = sig;
+        if (getIsApplying() || getIsAdjusting() || getIsExtracting()) {
+            debouncedLiveApply.cancel();
+            queuedLive = null;
+            setLivePending(true);
+            return;
+        }
+        // Don't loop on a failed request. A new edit or OFF/ON session retries it.
+        if (
+            lastLiveAttempt?.signature === signature &&
+            lastLiveAttempt.session === session
+        ) {
+            setLivePending(false);
+            return;
+        }
+        queuedLive = {signature, session};
         setLivePending(true);
         debouncedLiveApply();
     });
 
+    onDestroy(() => {
+        cleanupFileDrop?.();
+        invalidateLiveApplySession();
+        debouncedLiveApply.cancel();
+        syncStateToBackend.cancel();
+        setLivePending(false);
+    });
+
+    // Dropped files arrive from Wails as absolute paths. HandleDroppedFiles
+    // picks the first supported image and rejects everything else.
+    let cleanupFileDrop: (() => void) | null = null;
+
+    async function handleWallpaperDrop(paths: string[]): Promise<void> {
+        try {
+            const {HandleDroppedFiles} = await import('../wailsjs/go/main/App');
+            const path = await HandleDroppedFiles(paths);
+            setActiveTab('editor');
+            setWallpaperPath(path);
+            showToast('Wallpaper changed — click Extract to generate palette');
+        } catch {
+            showToast('Drop an image file to use as wallpaper');
+        }
+    }
+
     onMount(async () => {
+        // Register file drops before showing the window. The runtime installs
+        // preventDefault handlers for file drags, which stops WebKit from
+        // navigating to the dropped file instead of keeping the UI.
+        try {
+            const {OnFileDrop, OnFileDropOff} = await import(
+                '../wailsjs/runtime/runtime'
+            );
+            const guardEvents: string[] = [
+                'drag',
+                'dragenter',
+                'dragstart',
+                'dragend',
+            ];
+            const preventFileNavigation = (event: Event) => {
+                const dragEvent = event as DragEvent;
+                if (dragEvent.dataTransfer?.types.includes('Files')) {
+                    dragEvent.preventDefault();
+                }
+            };
+            for (const name of guardEvents) {
+                window.addEventListener(name, preventFileNavigation);
+            }
+            OnFileDrop((_x, _y, paths) => {
+                void handleWallpaperDrop(paths);
+            }, false);
+            cleanupFileDrop = () => {
+                OnFileDropOff();
+                for (const name of guardEvents) {
+                    window.removeEventListener(name, preventFileNavigation);
+                }
+            };
+        } catch (e) {
+            console.warn('File drop setup failed:', e);
+        }
+
         // Show window now that the DOM is ready (started hidden to avoid white flash)
         try {
             const {WindowShow} = await import('../wailsjs/runtime/runtime');
             WindowShow();
         } catch {}
 
+        await initOmarchyCapabilities();
+
         // Focus a specific tab if requested via --tab flag
         try {
             const {GetFocusTab} = await import('../wailsjs/go/main/App');
             const tab = await GetFocusTab();
-            if (tab && isValidTab(tab)) setActiveTab(tab);
+            if (tab && isValidTab(tab)) {
+                setActiveTab(
+                    tab === 'system' && !getOmarchyAvailable() ? 'editor' : tab
+                );
+            }
         } catch {}
 
         // Overwrite module-load DEFAULT_PALETTE with backend defaults
@@ -193,15 +326,22 @@
             if (s?.extendedColors) {
                 setExtendedColors(s.extendedColors);
             }
+            if (s?.nativeColors) {
+                setNativeColors(s.nativeColors);
+            }
+            setIconTheme(s?.iconTheme, true);
             if (s?.wallpaperPath) {
                 setWallpaperPath(s.wallpaperPath);
                 // Treat the restored wallpaper as already-extracted so a
                 // re-extract on the same image doesn't clear overrides.
                 setLastExtractedPath(s.wallpaperPath);
             }
+            setWallpaperBlur(!!s?.wallpaperBlur, true);
         } catch (e) {
             console.warn('GetInitialState failed:', e);
         }
+        initialLiveSignature = getThemeSignature();
+        initialStateLoaded = true;
 
         initKeyboardShortcuts();
 
@@ -278,6 +418,12 @@
             else if (getColorPickerOpen()) closeColorPicker();
             else if (getKeymapOpen()) setKeymapOpen(false);
         });
+
+        // Favorites export progress. Wired here rather than in FavoritesView
+        // so an export keeps reporting after the user switches tabs.
+        initExportEvents().catch(error =>
+            console.error('Favorites export events unavailable:', error)
+        );
 
         // Listen for events from Go
         (async () => {
@@ -418,10 +564,15 @@
                     (state: {
                         palette?: string[];
                         extendedColors?: Record<string, string>;
+                        nativeColors?: Record<string, string>;
+                        iconTheme?: {mode?: string; id?: string};
                         lightMode?: boolean;
                         mode?: string;
                         wallpaper?: string;
+                        wallpaperBlur?: boolean;
                         adjustments?: import('$lib/types/theme').Adjustments;
+                        appOverrides?: Record<string, Record<string, string>>;
+                        additionalImages?: string[];
                     }) => {
                         if (state.palette && state.palette.length >= 16) {
                             setPalette(state.palette);
@@ -429,17 +580,30 @@
                         if (state.extendedColors) {
                             setExtendedColors(state.extendedColors);
                         }
+                        if (state.nativeColors) {
+                            setNativeColors(state.nativeColors);
+                        }
+                        if (state.iconTheme)
+                            setIconTheme(state.iconTheme, true);
                         if (state.lightMode !== undefined) {
                             setLightMode(state.lightMode);
                         }
                         if (state.mode) {
                             setExtractionMode(state.mode);
                         }
-                        if (state.wallpaper) {
+                        if (state.wallpaper !== undefined) {
                             setWallpaperPath(state.wallpaper);
                         }
+                        if (state.wallpaperBlur !== undefined)
+                            setWallpaperBlur(state.wallpaperBlur, true);
                         if (state.adjustments) {
                             setAdjustments(state.adjustments);
+                        }
+                        if (state.appOverrides) {
+                            setAppOverrides(state.appOverrides);
+                        }
+                        if (state.additionalImages) {
+                            setAdditionalImages(state.additionalImages);
                         }
                     }
                 );
@@ -457,6 +621,8 @@
                     <ThemeEditor />
                 {:else if activeTab === 'wallhaven'}
                     <WallhavenBrowser />
+                {:else if activeTab === 'github'}
+                    <GitHubBrowser />
                 {:else if activeTab === 'local'}
                     <LocalBrowser />
                 {:else if activeTab === 'favorites'}
@@ -473,10 +639,11 @@
             </div>
         {/key}
     </main>
-    {#if activeTab === 'editor' && getTargetsVisible()}
+    {#if activeTab === 'editor' && getTargetsVisible() && !omarchyAvailable}
         <TargetAppsStrip />
     {/if}
     <ActionBar />
+    <ExportProgress />
     <Toast />
     <KeymapDialog open={getKeymapOpen()} onclose={() => setKeymapOpen(false)} />
     <CommandPalette
@@ -488,9 +655,5 @@
     <ApplySaveDialog
         open={getApplySaveDialogOpen()}
         onclose={() => setApplySaveDialogOpen(false)}
-        onsave={name => {
-            setApplySaveDialogOpen(false);
-            saveAndApplyTheme(name);
-        }}
     />
 </div>
